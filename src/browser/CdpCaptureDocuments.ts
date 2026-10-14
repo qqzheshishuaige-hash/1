@@ -94,7 +94,16 @@ export const captureResources = (
   for (const tree of walkFrameTrees(root, () =>
     completeness?.exclude("resources", "invalid_protocol_value"),
   )) {
-    for (const resource of recordsValue(tree.resources)) {
+    if (!Array.isArray(tree.resources)) {
+      completeness?.exclude("resources", "invalid_protocol_value", null);
+      continue;
+    }
+    for (const entry of tree.resources) {
+      const resource = recordValue(entry);
+      if (resource === undefined) {
+        completeness?.exclude("resources", "invalid_protocol_value");
+        continue;
+      }
       const url = allowedSanitizedUrl(resource.url, allowedOrigins);
       if (url === undefined || url.origin === null) {
         completeness?.exclude(
@@ -103,15 +112,26 @@ export const captureResources = (
         );
         continue;
       }
-      const contentSize = numberValue(resource.contentSize);
+      const type = cdpStringValue(resource.type);
+      const mimeType = cdpStringValue(resource.mimeType);
+      if (type === undefined || type.length === 0 || mimeType === undefined) {
+        completeness?.exclude("resources", "invalid_protocol_value");
+        continue;
+      }
+      const rawContentSize = numberValue(resource.contentSize);
+      const contentSize =
+        rawContentSize !== undefined && rawContentSize >= 0
+          ? rawContentSize
+          : null;
+      if (resource.contentSize !== undefined && contentSize === null)
+        completeness?.exclude("resources", "invalid_protocol_value");
       items.push({
         rawUrl: cdpStringValue(resource.url) ?? "",
         url: url.url,
         origin: url.origin,
-        type: cdpStringValue(resource.type) ?? "Other",
-        mime_type: cdpStringValue(resource.mimeType) ?? "",
-        content_size:
-          contentSize === undefined ? null : Math.max(0, contentSize),
+        type,
+        mime_type: mimeType,
+        content_size: contentSize,
       });
     }
   }
