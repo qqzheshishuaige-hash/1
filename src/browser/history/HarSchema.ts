@@ -1,10 +1,12 @@
 import { createRequire } from "node:module";
+import { isIP } from "node:net";
 import { Ajv } from "ajv";
 import { z } from "zod";
 import { CaptureFormatError } from "./CaptureFormatError.js";
+import { captureObject } from "./CaptureRedaction.js";
 
 /** Validate using the unchanged, pinned upstream HAR 1.2 draft-06 schemas. */
-export const createHarValidator = (): ((value: unknown) => void) => {
+export const createHarValidator = (): ((value: unknown) => boolean) => {
   const require = createRequire(import.meta.url);
   const schemas = z
     .record(z.string(), z.record(z.string(), z.unknown()))
@@ -20,7 +22,8 @@ export const createHarValidator = (): ((value: unknown) => void) => {
   if (validate === undefined)
     throw new Error("Pinned HAR root schema is unavailable");
   return (value) => {
-    allowMitmproxyAbsentPostData(value);
+    const adaptedPlaywrightAddress =
+      allowObservedProducerRepresentations(value);
     if (!validate(value)) {
       const error = validate.errors?.[0];
       // AJV messages name the violated constraint, such as the missing
@@ -33,59 +36,42 @@ export const createHarValidator = (): ((value: unknown) => void) => {
         error?.instancePath ?? "",
       );
     }
+    return adaptedPlaywrightAddress;
   };
 };
 
-/** Observed SaveHar 12.2.3 compatibility: validate omitted optional text while retaining reported null. */
-const allowMitmproxyAbsentPostData = (value: unknown): void => {
-  const parsed = z
-    .object({
-      log: z.object({
-        creator: z.object({
-          name: z.literal("mitmproxy"),
-          version: z.literal("12.2.3"),
-        }),
-        entries: z.array(z.unknown()),
-      }),
-    })
-    .safeParse(value);
-  if (
-    !parsed.success ||
-    typeof value !== "object" ||
-    value === null ||
-    !("log" in value)
-  )
-    return;
+/** Adapt only the disposable validation copy, preserving original reported spellings. */
+const allowObservedProducerRepresentations = (value: unknown): boolean => {
+  if (!captureObject(value) || !captureObject(value.log)) return false;
   const log = value.log;
-  if (
-    typeof log !== "object" ||
-    log === null ||
-    !("entries" in log) ||
-    !Array.isArray(log.entries)
-  )
-    return;
+  if (!captureObject(log.creator) || !Array.isArray(log.entries)) return false;
+  const mitmproxy =
+    log.creator.name === "mitmproxy" && log.creator.version === "12.2.3";
+  const playwright =
+    log.creator.name === "Playwright" && log.creator.version === "1.58.2";
+  if (!mitmproxy && !playwright) return false;
+  let adaptedPlaywrightAddress = false;
   for (const entry of log.entries) {
     const candidate: unknown = entry;
+    if (!captureObject(candidate)) continue;
+    // Playwright 1.58.2 forwards Chromium's remoteIPAddress spelling to HAR.
+    // Recognize an IPv6 literal, not URL authority syntax, ports or zone IDs.
+    const address = candidate.serverIPAddress;
     if (
-      typeof candidate !== "object" ||
-      candidate === null ||
-      !("request" in candidate)
-    )
-      continue;
+      playwright &&
+      typeof address === "string" &&
+      address.startsWith("[") &&
+      address.endsWith("]") &&
+      isIP(address.slice(1, -1)) === 6
+    ) {
+      candidate.serverIPAddress = address.slice(1, -1);
+      adaptedPlaywrightAddress = true;
+    }
+    if (!mitmproxy) continue;
     const request = candidate.request;
-    if (
-      typeof request !== "object" ||
-      request === null ||
-      !("postData" in request)
-    )
-      continue;
+    if (!captureObject(request)) continue;
     const body = request.postData;
-    if (
-      typeof body === "object" &&
-      body !== null &&
-      "text" in body &&
-      body.text === null
-    )
-      delete body.text;
+    if (captureObject(body) && body.text === null) delete body.text;
   }
+  return adaptedPlaywrightAddress;
 };
